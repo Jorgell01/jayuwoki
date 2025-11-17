@@ -13,85 +13,189 @@ import java.util.*;
 
 public class Privadita {
 
-  // Atributtes
-
-  //TODO:
+  // Attributes
   private MessageReceivedEvent event;
   private ListProperty<Player> players = new SimpleListProperty<>(FXCollections.observableArrayList());
   private StringProperty server = new SimpleStringProperty();
   private final ArrayList<String> roles = new ArrayList<>(List.of("Top", "Jungla", "Mid", "ADC", "Support"));
 
+  // Helper class to store team split
+  private static class TeamSplit {
+    List<Player> blueTeam;
+    List<Player> redTeam;
+
+    TeamSplit(List<Player> blueTeam, List<Player> redTeam) {
+      this.blueTeam = blueTeam;
+      this.redTeam = redTeam;
+    }
+  }
+
   public Privadita(List<Player> players, MessageReceivedEvent event) {
     this.server.set(event.getGuild().getName());
-    CheckPrivaditaCommand(players,event);
-    this.players.addAll(players);
+    this.event = event;
+
+    // Validate and fill this.players
+    if (!CheckPrivaditaCommand(players, event)) {
+      // Invalid command or players, do not start privadita
+      return;
+    }
+
+    // Start the match setup
     StartPrivadita(event);
   }
 
-  private void StartPrivadita(MessageReceivedEvent event) {
+private void StartPrivadita(MessageReceivedEvent event) {
 
-    // Shuffle the players so the teams are random
-    Collections.shuffle(players);
+    ObservableList<Player> playerList = this.players.get();
 
-    // Divide the players in two teams
-    for (int i = 0; i < 10; i++) {
-      players.get(i).setRole(roles.get(i % 5));
+    if (playerList == null || playerList.size() != 10) {
+        event.getChannel().sendMessage("Necesito exactamente 10 jugadores para hacer equipos balanceados.").queue();
+        return;
     }
+
+    // Work on a plain List<Player> copy to compute the optimal split
+    List<Player> baseList = new ArrayList<>(playerList);
+
+    // Get the most balanced split by Elo
+    TeamSplit split = createBalancedTeams(baseList);
+    List<Player> blueTeam = split.blueTeam;
+    List<Player> redTeam = split.redTeam;
+
+    // Optional: shuffle inside each team so roles are not tied to Elo order
+    Collections.shuffle(blueTeam);
+    Collections.shuffle(redTeam);
+
+    // Assign roles to players in each team
+    for (int i = 0; i < 5; i++) {
+        blueTeam.get(i).setRole(roles.get(i % roles.size()));
+        redTeam.get(i).setRole(roles.get(i % roles.size()));
+    }
+
+    // Rebuild the internal players list so indices 0-4 are Blue and 5-9 are Red
+    ObservableList<Player> orderedPlayers = FXCollections.observableArrayList();
+    orderedPlayers.addAll(blueTeam);
+    orderedPlayers.addAll(redTeam);
+    this.players.set(orderedPlayers);
+
+    // Calculate average Elo for both teams
+    int blueTotalElo = blueTeam.stream().mapToInt(Player::getElo).sum();
+    int redTotalElo = redTeam.stream().mapToInt(Player::getElo).sum();
+
+    double blueAvgElo = blueTotalElo / (double) blueTeam.size();
+    double redAvgElo = redTotalElo / (double) redTeam.size();
+
     // Create the message with the 2 teams
     StringBuilder messageBuilder = new StringBuilder();
 
     messageBuilder.append("```")
-            .append("\nBlue Team\n");
+            .append("\nBlue Team (avg Elo: ")
+            .append(String.format(java.util.Locale.US, "%.1f", blueAvgElo))
+            .append(")\n");
 
-    // Add the players to the blue team first 5
+    // Blue Team (first 5)
     for (int i = 0; i < 5; i++) {
-      Player player = players.get(i);
-      messageBuilder.append(player.getName())
-              .append(" -> ")
-              .append(player.getRole())
-              .append("\n");
+        Player player = this.players.get(i);
+        messageBuilder.append(player.getName())
+                .append(" (Elo: ").append(player.getElo()).append(")")
+                .append(" -> ")
+                .append(player.getRole())
+                .append("\n");
     }
 
-    messageBuilder.append("\nRed Team\n");
+    messageBuilder.append("\nRed Team (avg Elo: ")
+            .append(String.format(java.util.Locale.US, "%.1f", redAvgElo))
+            .append(")\n");
 
-// Añadir los siguientes 5 jugadores al equipo rojo
+    // Red Team (next 5)
     for (int i = 5; i < 10; i++) {
-      Player player = players.get(i);
-      messageBuilder.append(player.getName())
-              .append(" -> ")
-              .append(player.getRole())
-              .append("\n");
+        Player player = this.players.get(i);
+        messageBuilder.append(player.getName())
+                .append(" (Elo: ").append(player.getElo()).append(")")
+                .append(" -> ")
+                .append(player.getRole())
+                .append("\n");
     }
 
     messageBuilder.append("```");
 
-
     String formattedMessage = messageBuilder.toString();
     event.getChannel().sendMessage(formattedMessage).queue();
+}
+
+  // Brute-force optimal split by Elo
+  private TeamSplit createBalancedTeams(List<Player> playerList) {
+    int n = playerList.size(); // should be 10
+    int totalElo = playerList.stream().mapToInt(Player::getElo).sum();
+
+    int bestMask = 0;
+    int bestDiff = Integer.MAX_VALUE;
+
+    int limit = 1 << n; // 2^n
+
+    for (int mask = 0; mask < limit; mask++) {
+      // We only want teams of size n/2 (5 players)
+      if (Integer.bitCount(mask) != n / 2) {
+        continue;
+      }
+
+      int eloTeamA = 0;
+      for (int i = 0; i < n; i++) {
+        if ((mask & (1 << i)) != 0) {
+          eloTeamA += playerList.get(i).getElo();
+        }
+      }
+
+      int eloTeamB = totalElo - eloTeamA;
+      int diff = Math.abs(eloTeamA - eloTeamB);
+
+      if (diff < bestDiff) {
+        bestDiff = diff;
+        bestMask = mask;
+
+        // Early exit if perfect balance
+        if (diff == 0) {
+          break;
+        }
+      }
+    }
+
+    List<Player> blueTeam = new ArrayList<>();
+    List<Player> redTeam = new ArrayList<>();
+
+    for (int i = 0; i < n; i++) {
+      if ((bestMask & (1 << i)) != 0) {
+        blueTeam.add(playerList.get(i));
+      } else {
+        redTeam.add(playerList.get(i));
+      }
+    }
+
+    return new TeamSplit(blueTeam, redTeam);
   }
 
-
   // Function to check the command and fill the player list
-  private ListProperty<Player> CheckPrivaditaCommand(List<Player> playerList, MessageReceivedEvent event) {
+  private boolean CheckPrivaditaCommand(List<Player> playerList, MessageReceivedEvent event) {
     Set<String> uniqueNames = new HashSet<>();
-    ListProperty<Player> players = new SimpleListProperty<>(FXCollections.observableArrayList());
 
     for (Player player : playerList) {
       String name = player.getName();
 
-      if (!uniqueNames.add(name)) { // Si el nombre ya existe en el conjunto
+      // Check duplicated names
+      if (!uniqueNames.add(name)) {
         event.getChannel().sendMessage(name + " está repetido, prueba otra vez.").queue();
-        return null;
+        return false;
       }
 
+      // Check trolling names
       if (name.startsWith("$")) {
         event.getChannel().sendMessage("A donde vas listillo.").queue();
-        return null;
+        return false;
       }
 
-      players.add(player);
+      this.players.add(player);
     }
-    return players;
+
+    return true;
   }
 
   public void ResultadoPrivadita(String ganador, MessageReceivedEvent event) {
