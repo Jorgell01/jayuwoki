@@ -44,83 +44,113 @@ public class Privadita {
     StartPrivadita(event);
   }
 
-private void StartPrivadita(MessageReceivedEvent event) {
+  // java
+  private void StartPrivadita(MessageReceivedEvent event) {
+    Random rand = new Random();
+    int privaditaEspecial = rand.nextInt(21); // 0..20
+    System.out.println("Número aleatorio para privadita especial: " + privaditaEspecial);
 
     ObservableList<Player> playerList = this.players.get();
 
     if (playerList == null || playerList.size() != 10) {
-        event.getChannel().sendMessage("Necesito exactamente 10 jugadores para hacer equipos balanceados.").queue();
-        return;
+      event.getChannel().sendMessage("Necesito exactamente 10 jugadores para hacer equipos balanceados.").queue();
+      return;
     }
 
-    // Work on a plain List<Player> copy to compute the optimal split
     List<Player> baseList = new ArrayList<>(playerList);
-
-    // Get the most balanced split by Elo
     TeamSplit split = createBalancedTeams(baseList);
     List<Player> blueTeam = split.blueTeam;
     List<Player> redTeam = split.redTeam;
 
-    // Optional: shuffle inside each team so roles are not tied to Elo order
     Collections.shuffle(blueTeam);
     Collections.shuffle(redTeam);
 
-    // Assign roles to players in each team
-    for (int i = 0; i < 5; i++) {
-        blueTeam.get(i).setRole(roles.get(i % roles.size()));
-        redTeam.get(i).setRole(roles.get(i % roles.size()));
+    // Prepara roles locales sin tocar `this.roles`
+    List<String> baseRoles = new ArrayList<>(roles); // copia segura
+    int roleCount = baseRoles.size(); // esperado 5
+
+    List<String> blueRoles = new ArrayList<>(Collections.nCopies(5, ""));
+    List<String> redRoles = new ArrayList<>(Collections.nCopies(5, ""));
+
+    if (privaditaEspecial == 20) {
+      // Caso especial: no asignar roles explícitos
+      for (int i = 0; i < 5; i++) {
+        blueRoles.set(i, "");
+        redRoles.set(i, "");
+      }
+      // print special message to chat
+        event.getChannel().sendMessage("\uD83D\uDD25 Freemolly labubu ayiyi ahora no tienen excusa").queue();
+    } else if (privaditaEspecial >= 15) {
+      // 15..19: un jugador por equipo recibe '*' en su rol
+      int blueSpecialIndex = rand.nextInt(5);
+      int redSpecialIndex = rand.nextInt(5);
+      for (int i = 0; i < 5; i++) {
+        String base = baseRoles.get(i % roleCount);
+        blueRoles.set(i, (i == blueSpecialIndex) ? base + "*" : base);
+        redRoles.set(i, (i == redSpecialIndex) ? base + "*" : base);
+      }
+      //print to chat who are the special players
+        event.getChannel().sendMessage("\uD83D\uDD25 Atención: " + blueTeam.get(blueSpecialIndex).getName() + " y " + redTeam.get(redSpecialIndex).getName() + " pueden cambiar su rol con cualquier miembro del equipo (*)").queue();
+
+    } else {
+      // Caso normal: roles por defecto
+      for (int i = 0; i < 5; i++) {
+        String base = baseRoles.get(i % roleCount);
+        blueRoles.set(i, base);
+        redRoles.set(i, base);
+      }
     }
 
-    // Rebuild the internal players list so indices 0-4 are Blue and 5-9 are Red
+    // Asignar roles finales (una sola vez)
+    for (int i = 0; i < 5; i++) {
+      blueTeam.get(i).setRole(blueRoles.get(i));
+      redTeam.get(i).setRole(redRoles.get(i));
+    }
+
+    // Rebuild internal players list (0-4 Blue, 5-9 Red)
     ObservableList<Player> orderedPlayers = FXCollections.observableArrayList();
     orderedPlayers.addAll(blueTeam);
     orderedPlayers.addAll(redTeam);
     this.players.set(orderedPlayers);
 
-    // Calculate average Elo for both teams
+    // Calcular promedios y enviar mensaje (igual que antes)
     int blueTotalElo = blueTeam.stream().mapToInt(Player::getElo).sum();
     int redTotalElo = redTeam.stream().mapToInt(Player::getElo).sum();
-
     double blueAvgElo = blueTotalElo / (double) blueTeam.size();
     double redAvgElo = redTotalElo / (double) redTeam.size();
 
-    // Create the message with the 2 teams
     StringBuilder messageBuilder = new StringBuilder();
-
     messageBuilder.append("```")
             .append("\nBlue Team (avg Elo: ")
             .append(String.format(java.util.Locale.US, "%.1f", blueAvgElo))
             .append(")\n");
 
-    // Blue Team (first 5)
     for (int i = 0; i < 5; i++) {
-        Player player = this.players.get(i);
-        messageBuilder.append(player.getName())
-                .append(" (Elo: ").append(player.getElo()).append(")")
-                .append(" -> ")
-                .append(player.getRole())
-                .append("\n");
+      Player player = this.players.get(i);
+      messageBuilder.append(player.getName())
+              .append(" (Elo: ").append(player.getElo()).append(")")
+              .append(" -> ")
+              .append(player.getRole())
+              .append("\n");
     }
 
     messageBuilder.append("\nRed Team (avg Elo: ")
             .append(String.format(java.util.Locale.US, "%.1f", redAvgElo))
             .append(")\n");
 
-    // Red Team (next 5)
     for (int i = 5; i < 10; i++) {
-        Player player = this.players.get(i);
-        messageBuilder.append(player.getName())
-                .append(" (Elo: ").append(player.getElo()).append(")")
-                .append(" -> ")
-                .append(player.getRole())
-                .append("\n");
+      Player player = this.players.get(i);
+      messageBuilder.append(player.getName())
+              .append(" (Elo: ").append(player.getElo()).append(")")
+              .append(" -> ")
+              .append(player.getRole())
+              .append("\n");
     }
 
     messageBuilder.append("```");
+    event.getChannel().sendMessage(messageBuilder.toString()).queue();
+  }
 
-    String formattedMessage = messageBuilder.toString();
-    event.getChannel().sendMessage(formattedMessage).queue();
-}
 
   // Brute-force optimal split by Elo
   private TeamSplit createBalancedTeams(List<Player> playerList) {
