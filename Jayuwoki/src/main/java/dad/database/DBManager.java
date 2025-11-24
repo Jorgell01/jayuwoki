@@ -337,6 +337,40 @@ public class DBManager {
     }
 
     /**
+     * Get all players of the current guild from Firestore.
+     * Players are ordered by Elo descending.
+     */
+    public List<Player> getAllPlayers(MessageReceivedEvent event) {
+        List<Player> players = new ArrayList<>();
+
+        String guildId = event.getGuild().getId();
+        CollectionReference playersCollection = db.collection(guildId)
+                .document("Privadita")
+                .collection("Players");
+
+        try {
+            QuerySnapshot querySnapshot = playersCollection
+                    .orderBy("elo", Query.Direction.DESCENDING)
+                    .get()
+                    .get();
+
+            for (DocumentSnapshot doc : querySnapshot.getDocuments()) {
+                Player player = doc.toObject(Player.class);
+                if (player != null) {
+                    players.add(player);
+                }
+            }
+
+        } catch (Exception e) {
+            e.printStackTrace();
+            event.getChannel().sendMessage("❌ **Error while fetching players from the database.**").queue();
+        }
+
+        return players;
+    }
+
+
+    /**
      * Actualiza la lista de jugadores en Firebase.
      * Ahora usa el Guild ID del servidor.
      * 
