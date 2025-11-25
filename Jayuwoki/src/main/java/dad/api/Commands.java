@@ -23,6 +23,19 @@ import net.dv8tion.jda.api.events.message.MessageReceivedEvent;
 import net.dv8tion.jda.api.entities.Guild;
 import net.dv8tion.jda.api.managers.AudioManager;
 import org.jetbrains.annotations.NotNull;
+import net.dv8tion.jda.api.utils.FileUpload;
+import javax.imageio.ImageIO;
+import java.awt.Color;
+import java.awt.Font;
+import java.awt.BasicStroke;
+import java.awt.FontMetrics;
+import java.awt.GradientPaint;
+import java.awt.Graphics2D;
+import java.awt.RenderingHints;
+import java.awt.image.BufferedImage;
+import java.io.File;
+import java.io.IOException;
+
 
 import java.io.InputStream;
 import java.util.*;
@@ -182,7 +195,11 @@ public class Commands extends ListenerAdapter {
                         dbManager.ShowAllElo();
                     }
                     break;
-
+                
+                case "$verEscalera":
+                    handleVerEscalera(event);
+                    break;
+                        
                 case "$join":
                     joinVoiceChannel(event);
                     break;
@@ -432,6 +449,274 @@ public class Commands extends ListenerAdapter {
             event.getChannel().sendMessage("❌ **No estoy conectado a ningún canal de voz.**").queue();
         }
     }
+
+        // ==================== ELO LADDER (JENKS) ====================
+
+    private void handleVerEscalera(MessageReceivedEvent event) {
+        // Get all players for this server
+        List<Player> allPlayers = dbManager.getAllPlayers(event);
+
+        if (allPlayers == null || allPlayers.isEmpty()) {
+            event.getChannel().sendMessage("❌ **No players found in the database for this server.**").queue();
+            return;
+        }
+
+        // Sort players by Elo descending
+        allPlayers.sort(Comparator.comparingInt(Player::getElo).reversed());
+
+        // Decide number of classes for Jenks (simple heuristic)
+        int numClasses = Math.min(5, Math.max(2, (int) Math.round(Math.sqrt(allPlayers.size()))));
+
+        // Compute Jenks breaks
+        double[] breaks = computeJenksBreaks(allPlayers, numClasses);
+
+        // Group players by tier according to breaks
+        Map<Integer, List<Player>> tiers = clusterPlayersByJenks(allPlayers, breaks);
+
+        try {
+            File imageFile = generateLadderImage(tiers, breaks, event.getGuild().getName());
+            event.getChannel()
+                    .sendFiles(FileUpload.fromData(imageFile, "escalera_elo.png"))
+                    .queue();
+        } catch (IOException e) {
+            e.printStackTrace();
+            event.getChannel().sendMessage("❌ **Error while generating the ladder image.**").queue();
+        }
+    }
+
+    /**
+     * Compute Jenks natural breaks for player Elo values.
+     */
+    private double[] computeJenksBreaks(List<Player> players, int numClasses) {
+        int n = players.size();
+        double[] data = new double[n];
+        for (int i = 0; i < n; i++) {
+            data[i] = players.get(i).getElo();
+        }
+
+        // Sort ascending for Jenks
+        Arrays.sort(data);
+
+        double[][] mat1 = new double[n + 1][numClasses + 1];
+        double[][] mat2 = new double[n + 1][numClasses + 1];
+
+        for (int i = 1; i <= numClasses; i++) {
+            mat1[0][i] = 1.0;
+            mat2[0][i] = 0.0;
+            for (int j = 1; j <= n; j++) {
+                mat2[j][i] = Double.MAX_VALUE;
+            }
+        }
+
+        double sum, sumSq, w, variance = 0.0;
+        for (int l = 1; l <= n; l++) {
+            sum = 0.0;
+            sumSq = 0.0;
+            w = 0.0;
+
+            for (int m = 1; m <= l; m++) {
+                int i3 = l - m + 1;
+                double val = data[i3 - 1];
+
+                w += 1.0;
+                sum += val;
+                sumSq += val * val;
+
+                variance = sumSq - (sum * sum) / w;
+                int i4 = i3 - 1;
+
+                if (i4 != 0) {
+                    for (int j = 2; j <= numClasses; j++) {
+                        if (mat2[l][j] >= variance + mat2[i4][j - 1]) {
+                            mat1[l][j] = i3;
+                            mat2[l][j] = variance + mat2[i4][j - 1];
+                        }
+                    }
+                }
+            }
+            mat1[l][1] = 1.0;
+            mat2[l][1] = variance;
+        }
+
+        double[] breaks = new double[numClasses];
+        breaks[numClasses - 1] = data[n - 1];
+
+        int k = n;
+        for (int j = numClasses; j >= 2; j--) {
+            int id = (int) mat1[k][j] - 2;
+            breaks[j - 2] = data[id];
+            k = (int) mat1[k][j] - 1;
+        }
+
+        return breaks;
+    }
+
+    /**
+     * Assign players to tiers based on Jenks breaks.
+     * Key: tier index (0 = lowest, numClasses-1 = highest).
+     */
+    private Map<Integer, List<Player>> clusterPlayersByJenks(List<Player> players, double[] breaks) {
+        Map<Integer, List<Player>> tiers = new HashMap<>();
+        int numClasses = breaks.length;
+
+        for (int i = 0; i < numClasses; i++) {
+            tiers.put(i, new ArrayList<>());
+        }
+
+        for (Player p : players) {
+            int elo = p.getElo();
+            int tierIndex = 0;
+            for (int i = 0; i < numClasses; i++) {
+                if (elo <= breaks[i]) {
+                    tierIndex = i;
+                    break;
+                }
+            }
+            tiers.get(tierIndex).add(p);
+        }
+
+        return tiers;
+    }
+
+    private File generateLadderImage(Map<Integer, List<Player>> tiers, double[] breaks, String guildName) throws IOException {
+        int margin = 60;
+        int stepWidth = 180;
+        int stepHeight = 90;
+        int lineWidth = 6;
+        int titleHeight = 50;
+        int lineSpacing = 18;
+        int extraTopOffset = 120;     // extra space between title and staircase
+        int bottomLabelOffset = 60;  // space at the bottom for tier labels
+
+        // tiers: 0 = lowest, last = highest
+        List<Integer> tierIds = new ArrayList<>(tiers.keySet());
+        Collections.sort(tierIds);
+        int numTiers = tierIds.size();
+
+        int width = margin * 2 + stepWidth * numTiers + 250;
+        int height = margin * 2 + titleHeight + extraTopOffset
+                + stepHeight * (numTiers + 1) + bottomLabelOffset;
+
+        BufferedImage image = new BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB);
+        Graphics2D g = image.createGraphics();
+
+        g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+
+        // === Background with gradient ===
+        GradientPaint gp = new GradientPaint(
+                0, 0, new Color(18, 18, 24),
+                0, height, new Color(5, 5, 8)
+        );
+        g.setPaint(gp);
+        g.fillRect(0, 0, width, height);
+
+        // === Title with slight shadow ===
+        String title = "Elo Staircase - " + guildName;
+        Font titleFont = new Font("SansSerif", Font.BOLD, 30);
+        g.setFont(titleFont);
+        FontMetrics fmTitle = g.getFontMetrics();
+        int titleX = margin;
+        int titleY = margin + fmTitle.getAscent();
+
+        g.setColor(new Color(0, 0, 0, 150)); // shadow
+        g.drawString(title, titleX + 3, titleY + 3);
+        g.setColor(Color.WHITE);
+        g.drawString(title, titleX, titleY);
+
+        // Start of staircase (bottom-left)
+        int baseY = margin + titleHeight + extraTopOffset + stepHeight * (numTiers - 1);
+        int baseX = margin;
+
+        g.setStroke(new BasicStroke(lineWidth));
+
+        // For bottom tier labels
+        int bottomLabelY = baseY + 40;
+        int[] tierLabelCenters = new int[numTiers]; // index = humanTier-1 → x center
+
+        // === Draw steps from lowest (left/bottom) to highest (right/top) ===
+        for (int i = 0; i < numTiers; i++) {
+            int tierId = tierIds.get(i);
+            List<Player> playersInTier = tiers.get(tierId);
+            if (playersInTier == null || playersInTier.isEmpty()) {
+                continue;
+            }
+
+            // Ensure players are sorted by Elo descending inside each tier
+            playersInTier.sort(Comparator.comparingInt(Player::getElo).reversed());
+
+            int xStart = baseX + i * stepWidth;
+            int y = baseY - i * stepHeight;
+            int xEnd = xStart + stepWidth;
+
+            // Slight color variation per step
+            float ratio = (float) i / Math.max(1, numTiers - 1);
+            Color stepColor = new Color(
+                    (int) (220 + 20 * ratio),
+                    (int) (200 - 60 * ratio),
+                    255
+            );
+            g.setColor(stepColor);
+
+            // Horizontal step
+            g.drawLine(xStart, y, xEnd, y);
+
+            // Vertical rise to next step (except last)
+            if (i < numTiers - 1) {
+                g.drawLine(xEnd, y, xEnd, y - stepHeight);
+            }
+
+            // === Player names ABOVE the step, TOP = highest Elo ===
+            g.setFont(new Font("SansSerif", Font.PLAIN, 16));
+            int textX = xStart + 10;
+            // start higher so the first player (best Elo) quede arriba del todo
+            int textY = y - 10 - (playersInTier.size() - 1) * lineSpacing;
+
+            for (Player p : playersInTier) {
+                String label = p.getName() + " (" + p.getElo() + ")";
+
+                // Shadow
+                g.setColor(new Color(0, 0, 0, 180));
+                g.drawString(label, textX + 1, textY + 1);
+
+                // Main text
+                g.setColor(Color.WHITE);
+                g.drawString(label, textX, textY);
+
+                textY += lineSpacing; // now we go DOWNWARDS
+            }
+
+            // Save center X for bottom tier label
+            int humanTierNumber = numTiers - i; // top step => Tier 1
+            int centerX = xStart + stepWidth / 2;
+            tierLabelCenters[humanTierNumber - 1] = centerX;
+        }
+
+        // === Draw tier labels aligned at bottom ===
+        g.setFont(new Font("SansSerif", Font.BOLD, 18));
+        for (int humanTier = 1; humanTier <= numTiers; humanTier++) {
+            int centerX = tierLabelCenters[humanTier - 1];
+            if (centerX == 0) continue;
+
+            String tierText = "Tier " + humanTier;
+            FontMetrics fm = g.getFontMetrics();
+            int textWidth = fm.stringWidth(tierText);
+
+            // Shadow
+            g.setColor(new Color(0, 0, 0, 180));
+            g.drawString(tierText, centerX - textWidth / 2 + 2, bottomLabelY + 2);
+
+            // Text
+            g.setColor(new Color(230, 230, 230));
+            g.drawString(tierText, centerX - textWidth / 2, bottomLabelY);
+        }
+
+        g.dispose();
+
+        File out = File.createTempFile("elo_staircase_", ".png");
+        ImageIO.write(image, "png", out);
+        return out;
+    }
+
 
     private void sendHelpMessage(MessageReceivedEvent event) {
         try {
